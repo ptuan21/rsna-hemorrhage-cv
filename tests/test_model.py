@@ -63,6 +63,30 @@ def test_classifier_forward_shape_varying_batch_and_length() -> None:
     assert logits.shape == (2, 5)
 
 
+def test_classifier_skips_encoder_compute_on_padded_slices() -> None:
+    """Padded positions must never reach the CNN encoder — memory/compute must
+    scale with the number of real slices, not batch_size * max_len."""
+    model = HemorrhageSequenceClassifier(num_classes=5, pretrained=False)
+    model.eval()
+
+    seen_batch_sizes: list[int] = []
+    original_forward = model.encoder.forward
+
+    def spy_forward(x: torch.Tensor) -> torch.Tensor:
+        seen_batch_sizes.append(x.shape[0])
+        return original_forward(x)
+
+    model.encoder.forward = spy_forward  # type: ignore[method-assign]
+
+    slices = torch.randn(2, 4, 3, 64, 64)
+    mask = torch.tensor([[True, True, True, False], [True, False, False, False]])
+
+    with torch.no_grad():
+        model(slices, mask)
+
+    assert seen_batch_sizes == [int(mask.sum())]  # 4 real slices, not 8
+
+
 def test_classifier_forward_single_slice_sequence() -> None:
     """Edge case: T=1, matching real single-slice sequences in the dataset."""
     model = HemorrhageSequenceClassifier(num_classes=5, pretrained=False)

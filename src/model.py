@@ -53,9 +53,21 @@ class HemorrhageSequenceClassifier(nn.Module):
         self.classifier = nn.Linear(self.encoder.out_dim, num_classes)
 
     def forward(self, slices: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """slices: (B, T, C, H, W), mask: (B, T) -> logits (B, num_classes)."""
+        """slices: (B, T, C, H, W), mask: (B, T) -> logits (B, num_classes).
+
+        Only real (non-padded) slices are run through the CNN encoder — padded
+        positions are skipped entirely, since batches routinely mix short and
+        long sequences and full-batch padding otherwise wastes both compute
+        and, at 384x384 resolution, GPU memory.
+        """
         b, t, c, h, w = slices.shape
         flat = slices.view(b * t, c, h, w)
-        embeddings = self.encoder(flat).view(b, t, -1)
+        flat_mask = mask.view(b * t)
+
+        valid_embeddings = self.encoder(flat[flat_mask])  # (N_valid, out_dim)
+        embeddings = flat.new_zeros(b * t, self.encoder.out_dim)
+        embeddings[flat_mask] = valid_embeddings
+        embeddings = embeddings.view(b, t, -1)
+
         pooled = self.pooling(embeddings, mask)
         return self.classifier(pooled)
