@@ -41,6 +41,15 @@ def compute_class_weights(labels: Sequence[int], num_classes: int) -> torch.Tens
     return torch.tensor(weights, dtype=torch.float32)
 
 
+def build_sample_weights(labels: Sequence[int], class_weights: torch.Tensor) -> list[float]:
+    """Maps each training example to its class weight, for WeightedRandomSampler.
+
+    Feeding these into WeightedRandomSampler oversamples minority classes at the
+    batch level, complementing (not replacing) loss-level class weighting.
+    """
+    return [float(class_weights[label]) for label in labels]
+
+
 def compute_metrics(
     y_true: Sequence[int], y_pred: Sequence[int], num_classes: int
 ) -> dict[str, float]:

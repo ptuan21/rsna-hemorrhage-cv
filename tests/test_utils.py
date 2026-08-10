@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import torch
 
-from src.utils import compute_class_weights, compute_metrics, get_device, set_seed
+from src.utils import (
+    build_sample_weights,
+    compute_class_weights,
+    compute_metrics,
+    get_device,
+    set_seed,
+)
 
 
 def test_set_seed_reproducibility() -> None:
@@ -35,6 +41,20 @@ def test_compute_class_weights_handles_absent_class() -> None:
 
     assert weights.shape == (3,)
     assert torch.isfinite(weights).all()
+
+
+def test_build_sample_weights_maps_each_label_to_its_class_weight() -> None:
+    class_weights = torch.tensor([2.0, 0.5])
+    labels = [0, 1, 0, 1, 1]
+
+    weights = build_sample_weights(labels, class_weights)
+
+    assert weights == [2.0, 0.5, 2.0, 0.5, 0.5]
+
+
+def test_build_sample_weights_empty_labels() -> None:
+    """Edge case: an empty split must not raise."""
+    assert build_sample_weights([], torch.tensor([1.0, 1.0])) == []
 
 
 def test_compute_metrics_perfect_predictions() -> None:

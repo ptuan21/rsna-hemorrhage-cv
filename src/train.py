@@ -7,12 +7,19 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from src.dataset import LABEL_TO_IDX, LABELS, RSNASequenceDataset, collate_sequences
+from src.losses import FocalLoss
 from src.model import HemorrhageSequenceClassifier
-from src.utils import compute_class_weights, compute_metrics, get_device, set_seed
+from src.utils import (
+    build_sample_weights,
+    compute_class_weights,
+    compute_metrics,
+    get_device,
+    set_seed,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--max-slices", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--device", type=str, default="auto")
@@ -82,10 +90,17 @@ def main() -> None:
         args.data_root / "validation.csv", args.data_root, max_slices=args.max_slices
     )
 
+    train_labels = train_ds.df["Label"].map(LABEL_TO_IDX).tolist()
+    class_weights = compute_class_weights(train_labels, num_classes=len(LABELS))
+    sample_weights = build_sample_weights(train_labels, class_weights)
+    sampler = WeightedRandomSampler(
+        sample_weights, num_samples=len(train_labels), replacement=True
+    )
+
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
-        shuffle=True,
+        sampler=sampler,
         num_workers=args.num_workers,
         collate_fn=collate_sequences,
     )
@@ -101,9 +116,7 @@ def main() -> None:
         num_classes=len(LABELS), pretrained=not args.no_pretrained
     ).to(device)
 
-    train_labels = train_ds.df["Label"].map(LABEL_TO_IDX).tolist()
-    class_weights = compute_class_weights(train_labels, num_classes=len(LABELS)).to(device)
-    criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+    criterion = FocalLoss(gamma=args.focal_gamma, alpha=class_weights).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
