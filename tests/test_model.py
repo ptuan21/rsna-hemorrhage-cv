@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import torch
 
-from src.model import AttentionPooling, HemorrhageSequenceClassifier, SliceEncoder
+from src.model import (
+    AttentionPooling,
+    HemorrhageSequenceClassifier,
+    SequenceContextEncoder,
+    SliceEncoder,
+)
 
 
 def test_slice_encoder_output_shape() -> None:
@@ -48,6 +53,40 @@ def test_attention_pooling_all_valid_weights_sum_to_one() -> None:
     scores = pooling.score(embeddings).squeeze(-1)
     weights = torch.softmax(scores, dim=1)
     assert torch.allclose(weights.sum(dim=1), torch.ones(2), atol=1e-6)
+
+
+def test_sequence_context_encoder_output_shape_varying_lengths() -> None:
+    encoder = SequenceContextEncoder(in_dim=8, hidden_dim=6)
+    encoder.eval()
+
+    embeddings = torch.randn(3, 5, 8)
+    mask = torch.tensor(
+        [
+            [True, True, True, True, True],
+            [True, True, False, False, False],
+            [True, False, False, False, False],
+        ]
+    )
+
+    with torch.no_grad():
+        out = encoder(embeddings, mask)
+
+    assert out.shape == (3, 5, encoder.out_dim)
+    assert torch.isfinite(out).all()
+
+
+def test_sequence_context_encoder_single_slice_sequence() -> None:
+    """Edge case: T=1 must not break pack_padded_sequence."""
+    encoder = SequenceContextEncoder(in_dim=8, hidden_dim=6)
+    encoder.eval()
+
+    embeddings = torch.randn(1, 1, 8)
+    mask = torch.tensor([[True]])
+
+    with torch.no_grad():
+        out = encoder(embeddings, mask)
+
+    assert out.shape == (1, 1, encoder.out_dim)
 
 
 def test_classifier_forward_shape_varying_batch_and_length() -> None:

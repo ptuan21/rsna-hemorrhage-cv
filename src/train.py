@@ -35,6 +35,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-slices", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=5.0)
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=7,
+        help="Stop early after this many epochs with no val macro-F1 improvement.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--device", type=str, default="auto")
@@ -47,6 +54,7 @@ def run_epoch(
     criterion: torch.nn.Module,
     device: torch.device,
     optimizer: Optional[torch.optim.Optimizer] = None,
+    grad_clip_norm: Optional[float] = None,
 ) -> tuple[float, dict[str, float]]:
     """Runs one pass over `loader`; trains if `optimizer` is given, else evaluates."""
     is_train = optimizer is not None
@@ -66,6 +74,8 @@ def run_epoch(
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
+                if grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
                 optimizer.step()
 
             total_loss += loss.item() * labels.size(0)
@@ -84,7 +94,7 @@ def main() -> None:
     print(f"Using device: {device}")
 
     train_ds = RSNASequenceDataset(
-        args.data_root / "train.csv", args.data_root, max_slices=args.max_slices
+        args.data_root / "train.csv", args.data_root, max_slices=args.max_slices, augment=True
     )
     val_ds = RSNASequenceDataset(
         args.data_root / "validation.csv", args.data_root, max_slices=args.max_slices
@@ -120,16 +130,21 @@ def main() -> None:
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_macro_f1 = -1.0
+    epochs_without_improvement = 0
 
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_metrics = run_epoch(model, train_loader, criterion, device, optimizer)
+        train_loss, train_metrics = run_epoch(
+            model, train_loader, criterion, device, optimizer, args.grad_clip_norm
+        )
         val_loss, val_metrics = run_epoch(model, val_loader, criterion, device, optimizer=None)
+        scheduler.step()
 
         print(
-            f"epoch {epoch:03d} | "
+            f"epoch {epoch:03d} | lr={scheduler.get_last_lr()[0]:.2e} | "
             f"train_loss={train_loss:.4f} acc={train_metrics['accuracy']:.4f} "
             f"macro_f1={train_metrics['macro_f1']:.4f} | "
             f"val_loss={val_loss:.4f} acc={val_metrics['accuracy']:.4f} "
@@ -138,8 +153,17 @@ def main() -> None:
 
         if val_metrics["macro_f1"] > best_macro_f1:
             best_macro_f1 = val_metrics["macro_f1"]
+            epochs_without_improvement = 0
             torch.save(model.state_dict(), args.checkpoint_dir / "best_model.pt")
             print(f"  -> saved new best checkpoint (macro_f1={best_macro_f1:.4f})")
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= args.patience:
+                print(
+                    f"  -> stopping early: no val macro_f1 improvement in "
+                    f"{args.patience} epochs"
+                )
+                break
 
 
 if __name__ == "__main__":

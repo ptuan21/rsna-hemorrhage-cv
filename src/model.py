@@ -23,6 +23,34 @@ class SliceEncoder(nn.Module):
         return features.flatten(1)
 
 
+class SequenceContextEncoder(nn.Module):
+    """Bidirectional GRU that contextualizes each slice's embedding using its
+    neighbors before pooling.
+
+    Plain attention pooling is permutation-invariant, so it otherwise ignores
+    slice order entirely — but a hemorrhage finding typically spans several
+    consecutive slices, and this lets each slice's representation pick up
+    signal from adjacent slices before the sequence is collapsed to one vector.
+    """
+
+    def __init__(self, in_dim: int, hidden_dim: int = 256) -> None:
+        super().__init__()
+        self.gru = nn.GRU(in_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.out_dim: int = hidden_dim * 2
+
+    def forward(self, embeddings: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """embeddings: (B, T, in_dim), mask: (B, T) -> (B, T, out_dim)."""
+        lengths = mask.sum(dim=1).clamp(min=1).cpu()
+        packed = nn.utils.rnn.pack_padded_sequence(
+            embeddings, lengths, batch_first=True, enforce_sorted=False
+        )
+        packed_out, _ = self.gru(packed)
+        out, _ = nn.utils.rnn.pad_packed_sequence(
+            packed_out, batch_first=True, total_length=embeddings.size(1)
+        )
+        return out
+
+
 class AttentionPooling(nn.Module):
     """Masked additive attention pooling over the slice (sequence) dimension."""
 
@@ -44,13 +72,18 @@ class AttentionPooling(nn.Module):
 
 
 class HemorrhageSequenceClassifier(nn.Module):
-    """Per-slice CNN encoder -> attention pooling -> linear classifier head."""
+    """Per-slice CNN encoder -> GRU sequence context -> attention pooling -> classifier."""
 
-    def __init__(self, num_classes: int, pretrained: bool = True) -> None:
+    def __init__(
+        self, num_classes: int, pretrained: bool = True, gru_hidden_dim: int = 256
+    ) -> None:
         super().__init__()
         self.encoder = SliceEncoder(pretrained=pretrained)
-        self.pooling = AttentionPooling(in_dim=self.encoder.out_dim)
-        self.classifier = nn.Linear(self.encoder.out_dim, num_classes)
+        self.sequence_encoder = SequenceContextEncoder(
+            in_dim=self.encoder.out_dim, hidden_dim=gru_hidden_dim
+        )
+        self.pooling = AttentionPooling(in_dim=self.sequence_encoder.out_dim)
+        self.classifier = nn.Linear(self.sequence_encoder.out_dim, num_classes)
 
     def forward(self, slices: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """slices: (B, T, C, H, W), mask: (B, T) -> logits (B, num_classes).
@@ -69,5 +102,6 @@ class HemorrhageSequenceClassifier(nn.Module):
         embeddings[flat_mask] = valid_embeddings
         embeddings = embeddings.view(b, t, -1)
 
-        pooled = self.pooling(embeddings, mask)
+        context = self.sequence_encoder(embeddings, mask)
+        pooled = self.pooling(context, mask)
         return self.classifier(pooled)

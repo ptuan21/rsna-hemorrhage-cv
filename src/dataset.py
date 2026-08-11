@@ -8,6 +8,7 @@ from typing import Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import torch
+import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
 
 LABELS: tuple[str, ...] = (
@@ -36,11 +37,13 @@ class RSNASequenceDataset(Dataset):
         data_root: Union[str, Path],
         max_slices: Optional[int] = None,
         normalize: bool = True,
+        augment: bool = False,
     ) -> None:
         self.data_root = Path(data_root)
         self.df = pd.read_csv(csv_path)
         self.max_slices = max_slices
         self.normalize = normalize
+        self.augment = augment
 
     def __len__(self) -> int:
         return len(self.df)
@@ -55,6 +58,8 @@ class RSNASequenceDataset(Dataset):
 
         tensor = torch.from_numpy(sequence.copy()).float() / 255.0  # (T, H, W, C)
         tensor = tensor.permute(0, 3, 1, 2).contiguous()  # (T, C, H, W)
+        if self.augment:
+            tensor = self._augment(tensor)
         if self.normalize:
             tensor = (tensor - _IMAGENET_MEAN) / _IMAGENET_STD
 
@@ -67,6 +72,26 @@ class RSNASequenceDataset(Dataset):
             return sequence
         indices = np.linspace(0, num_slices - 1, self.max_slices).round().astype(int)
         return sequence[indices]
+
+    @staticmethod
+    def _augment(tensor: torch.Tensor) -> torch.Tensor:
+        """Light, sequence-consistent augmentation on a raw [0, 1] slice stack.
+
+        The same flip/rotation is applied to every slice in the sequence (they
+        come from one CT case and must stay anatomically coherent), while
+        brightness/contrast jitter approximates scanner/windowing variation.
+        """
+        if torch.rand(()).item() < 0.5:
+            tensor = tensor.flip(-1)
+
+        angle = float(torch.empty(()).uniform_(-10.0, 10.0))
+        tensor = TF.rotate(tensor, angle, fill=0.0)
+
+        brightness = float(torch.empty(()).uniform_(0.9, 1.1))
+        contrast = float(torch.empty(()).uniform_(0.9, 1.1))
+        mean = tensor.mean()
+        tensor = (tensor - mean) * contrast + mean * brightness
+        return tensor.clamp(0.0, 1.0)
 
 
 def collate_sequences(
